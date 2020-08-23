@@ -13,9 +13,8 @@ def safe_print(lock: Lock, s: str):
     :param s: string to type
     :return: None
     """
-    lock.acquire()
-    print(s)
-    lock.release()
+    with lock:
+        print(s)
 
 
 def message_handler(msg: str):

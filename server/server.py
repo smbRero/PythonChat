@@ -16,9 +16,8 @@ def safe_print(lock: threading.Lock, s: str):
     :param s: string to type
     :return: None
     """
-    lock.acquire()
-    print(s)
-    lock.release()
+    with lock:
+        print(s)
 
 
 class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
@@ -33,14 +32,16 @@ class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
         new_name = client_name
 
         # name should be unique per chat
-        while new_name in self.server.names:
-            index = index + 1
-            new_name = "{}({})".format(client_name, index)
+        with self.server.names_mutex:
+            while new_name in self.server.names:
+                index = index + 1
+                new_name = f"{client_name}({index})"
+            self.server.names.add(new_name)
 
-        self.server.names.add(new_name)
         safe_print(print_mutex, f"{new_name} connected")
         safe_print(print_mutex, self.client_address)
-        self.server.handlers.append(self)
+        with self.server.handlers_mutex:
+            self.server.handlers.append(self)
         self.server.send_member_count()
         self.server.send_to_all(self, f"{new_name} joined")
         while True:
@@ -49,8 +50,10 @@ class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
                 safe_print(print_mutex, "received from client: {}".format(data))
                 self.server.send_to_all(self, f"{new_name}: {data}")
             except ConnectionResetError:  # Client disconnected
-                self.server.handlers.remove(self)
-                self.server.names.remove(new_name)
+                with self.server.handlers_mutex:
+                    self.server.handlers.remove(self)
+                with self.server.names_mutex:
+                    self.server.names.remove(new_name)
                 self.server.send_to_all(self, f"{new_name} disconnected")
                 self.server.send_member_count()
                 safe_print(print_mutex, f"Client {self.client_address} disconnected")
@@ -65,20 +68,27 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         super(ThreadedTCPServer, self).__init__(*args, **kwargs)
         self.handlers = []  # list of handlers
         self.names = set()  # set for client names
+        self.names_mutex = threading.Lock()  # Lock for names container
+        self.handlers_mutex = threading.Lock()  # Lock for handlers container
 
     def send_to_all(self, author: ThreadedTCPRequestHandler, message: str):
         data = bytes(MESSAGE_PREFIX, 'ascii')
         data = data + len(message).to_bytes(2, byteorder='big', signed=False)
         data = data + bytes(message, 'utf-8')
-        for client in self.handlers:
-            if client is not author:
-                client.request.sendall(data)
+        with self.handlers_mutex:
+            for client in self.handlers:
+                if client is not author:
+                    try:
+                        client.request.sendall(data)
+                    except ConnectionResetError:  # client disconnected
+                        continue
 
     def send_member_count(self):
         data = bytes(MEMBER_COUNT_PREFIX, "ascii")
-        data = data + len(self.handlers).to_bytes(1, byteorder='big', signed=False)
-        for client in self.handlers:
-            client.request.sendall(data)
+        with self.handlers_mutex:
+            data = data + len(self.handlers).to_bytes(1, byteorder='big', signed=False)
+            for client in self.handlers:
+                client.request.sendall(data)
 
 
 def start_server(host, port):
